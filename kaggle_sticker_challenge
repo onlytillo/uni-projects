@@ -1,0 +1,100 @@
+KAGGLE - Forecasting Sticker Sales
+https://www.kaggle.com/competitions/playground-series-s5e1
+
+(no ML only statistical models)
+
+library(dplyr)
+library(forecast)
+library(lubridate)
+library(Metrics)
+
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+train <- na.omit(train)
+
+# TIME-SERIES APPROACH
+time_series_data <- train %>%
+  group_by(country, store, product) %>%
+  arrange(date) %>% 
+  summarise(num_sold_series = list(num_sold)) %>%
+  ungroup()
+
+summary_data <- time_series_data %>%
+  select(country, store, product, num_sold_series)
+
+models <- list()
+for(i in 1:nrow(summary_data)){
+  models[[i]]<-auto.arima(time_series_data$num_sold_series[[i]])
+}
+
+# GLM APPROACH
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+train <- na.omit(train)
+
+# Encoding month variable
+month <- rep(0,nrow(train))
+for(i in 1:nrow(train)){
+  month[i] <- as.integer(substr(train$date[i],6,7))
+}
+month <- month(month,label=T)
+train <- cbind(train,month)
+
+# Split the train into train & test
+index <- sample(1:nrow(train), nrow(train)*0.7, replace = T)
+mytrain <- train[index,]
+mytest <- train[-index,]
+
+# model with covariates and interactions
+mod <- glm(num_sold~country+store+product+month+
+             country*product+country*store+country*month+
+             product*store+product*month+store*month,
+           data=mytrain,
+           family=poisson)
+
+yhat <- predict(mod, newdata=mytest, type="response")
+mape(mytest$num_sold, yhat)
+
+# SUBMISSION FORECAST WITH GLM
+sub_mod <- glm(num_sold~country+store+product+month+
+             country*product+country*store+country*month+
+             product*store+product*month+store*month,
+           data=train,
+           family=poisson)
+
+month <- rep(0,nrow(test))
+for(i in 1:nrow(test)){
+  month[i] <- as.integer(substr(test$date[i],6,7))
+}
+month <- month(month,label=T)
+test <- cbind(test,month)
+
+sub_yhat <- predict(sub_mod, newdata=test, type="response")
+submission <- read.csv("sample_submission.csv")
+submission[,2] <- sub_yhat
+write.csv(submission, file = "final_submission.csv", row.names = F)
+
+sub_yhat_with_arimas <- sub_yhat
+
+# Group up test to count arima forecasts needed
+test <- read.csv("test.csv")
+indici_test <- seq(1,nrow(test),by=1)
+test <- cbind(test,indici_test)
+
+grouped_test <- test %>%
+  group_by(country, store, product) %>%
+  summarise(indici_test_series = list(indici_test)) %>%
+  ungroup()
+
+summary_test <- grouped_test %>%
+  select(country, store, product, indici_test_series)
+
+for(i in 1:90){
+  print(length(summary_test$indici_test_series[[i]]))
+}
+
+# ARIMA PREDICTIONS (for missing values let's use the sub_yhat)
+previsioni <- c()
+for(i in 1:length(models)){
+  previsioni <- c(previsioni, forecast(models[[i]], h = 1095)$mean)
+}
