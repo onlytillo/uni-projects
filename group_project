@@ -1,0 +1,162 @@
+University group project about videogames sales and ratings
+https://www.kaggle.com/datasets/rush4ratio/video-game-sales-with-ratings
+
+Binary and multinomial logistic regression
+
+library(MASS)
+library(DescTools)
+library(margins)
+library(erer)
+library(fastDummies)
+
+newdf <- read.csv("dataset_analisi.csv")
+ks.test(newdf$User_Score,newdf$Critic_Score/10)
+
+# 
+pub <- as.data.frame(sort(table(newdf$Publisher))[223:272])
+dev <- as.data.frame(sort(table(newdf$Developer))[1206:1305])
+df_class <- read.table("vg_sales&rating_puro.csv",sep=",",header=T)
+df_class <- df_class[,-c(1,3)]
+for(i in 1:nrow(df_class)){
+  trovato=FALSE
+  for(j in pub[,1]){
+    if(df_class[i,]$Publisher==j){
+      trovato=TRUE
+    }
+  }
+  if(!trovato){
+    df_class[i,]$Publisher="Misc"
+  }
+}
+for(i in 1:nrow(df_class)){
+  trovato=FALSE
+  for(j in dev[,1]){
+    if(df_class[i,]$Developer==j){
+      trovato=TRUE
+    }
+  }
+  if(!trovato){
+    df_class[i,]$Developer="Misc"
+  }
+}
+
+
+df_dummies <- dummy_cols(df_class, select_columns = c("Platform", "Publisher", "Genre", "Developer"))
+
+colnames(df_dummies)=gsub(" ","_",colnames(df_dummies)) #sostituzione spazi con _
+colnames(df_dummies)=gsub("!","",colnames(df_dummies)) #rimozione !
+colnames(df_dummies)=gsub(",","",colnames(df_dummies)) #rimozione ,
+colnames(df_dummies)=gsub("/","",colnames(df_dummies)) #rimozione /
+colnames(df_dummies)=gsub("-","",colnames(df_dummies)) #rimozione -
+colnames(df_dummies)=gsub(":","",colnames(df_dummies)) #rimozione :
+colnames(df_dummies)=gsub("'","",colnames(df_dummies)) #rimozione '
+colnames(df_dummies)=gsub("&","",colnames(df_dummies)) #rimozione &
+colnames(df_dummies)=gsub("\\(","",colnames(df_dummies)) #rimozione (
+colnames(df_dummies)=gsub("\\)","",colnames(df_dummies)) #rimozione )
+colnames(df_dummies)=gsub("\\+","",colnames(df_dummies)) #rimozione +
+
+df_dummies$votocritica_order <- rep(0,length(df_dummies$Critic_Score))
+df_dummies$votoutenza_order <- rep(0,length(df_dummies$User_Score))
+for(i in 1:length(df_dummies$Critic_Score)){
+  if(df_dummies$Critic_Score[i]<60){
+    df_dummies$votocritica_order[i]=0
+  }
+  else if((df_dummies$Critic_Score[i]>=60)&&(df_dummies$Critic_Score[i]<80)){
+    df_dummies$votocritica_order[i]=1
+  }
+  else{
+    df_dummies$votocritica_order[i]=2
+  }
+}
+for(i in 1:length(df_dummies$User_Score)){
+  if(df_dummies$User_Score[i]<6){
+    df_dummies$votoutenza_order[i]=0
+  }
+  else if((df_dummies$User_Score[i]>=6)&&(df_dummies$User_Score[i]<8)){
+    df_dummies$votoutenza_order[i]=1
+  }
+  else{
+    df_dummies$votoutenza_order[i]=2
+  }
+}
+df_dummies$votocritica_order <- as.factor(df_dummies$votocritica_order)
+df_dummies$votoutenza_order <- as.factor(df_dummies$votoutenza_order)
+
+# Binary classification
+df_dummies$votocritica_bin <- rep(0, length(df_dummies$Critic_Score))
+df_dummies$votoutenza_bin <- rep(0, length(df_dummies$User_Score))
+for(i in 1:length(df_dummies$Critic_Score)){
+  if(df_dummies$Critic_Score[i]<60){
+    df_dummies$votocritica_bin[i]=0
+  }
+  else {df_dummies$votocritica_bin[i]=1
+  }
+}
+table(df_dummies$votocritica_bin)
+for(i in 1:length(df_dummies$User_Score)){
+  if(df_dummies$User_Score[i]<6){
+    df_dummies$votoutenza_bin[i]=0
+  }
+  else {df_dummies$votoutenza_bin[i]=1}
+}
+df_dummies$votocritica_bin <- as.factor(df_dummies$votocritica_bin)
+df_dummies$votoutenza_bin <- as.factor(df_dummies$votoutenza_bin)
+
+write.csv(df_dummies, "classificazione.csv")
+
+df <- df_dummies
+
+# Binary logit
+df_votoutenza_bin <- df[,-c(1:11,193,194,195)]
+formula_votoutenza_bin <- reformulate(colnames(df_votoutenza_bin)[-182], response = "votoutenza_bin")
+logit_votoutenza <- glm(formula_votoutenza_bin, data = df, family = "binomial")
+s_user <- summary(logit_votoutenza)
+
+coeff_user <- s_user$coefficients[(which(s_user$coefficients[,4]<0.01)),]
+formula_votoutenza_bin <- reformulate((rownames(coeff_user)), response = "votoutenza_bin")
+logit_votoutenza <- logit_votoutenza <- glm(formula_votoutenza_bin, data = df, family = "binomial")
+marginal_bin_user <- margins(logit_votoutenza)
+marginal_bin_user <- data.frame(marginal_bin_user)
+marginal_bin_user <- marginal_bin_user[199:214]
+marginal_bin_user <- apply(marginal_bin_user,2,mean)
+
+df_votoutenza_crit <- df[,-c(1:11,193,194,196)]
+formula_votocritica_bin <- reformulate(colnames(df_votoutenza_crit)[-182], response = "votocritica_bin")
+logit_votocritica <- glm(formula_votocritica_bin, data = df, family = "binomial")
+s_crit <- summary(logit_votocritica)
+
+coeff_crit <- s_crit$coefficients[(which(s_crit$coefficients[,4]<0.01)),]
+formula_votocritica_bin <- reformulate((rownames(coeff_crit)), response = "votocritica_bin")
+logit_votocritica <- glm(formula_votocritica_bin, data = df, family = "binomial")
+marginal_bin_crit <- margins(logit_votocritica)
+marginal_bin_crit <- data.frame(marginal_bin_crit)
+marginal_bin_crit <- marginal_bin_crit[199:237]
+marginal_bin_crit <- apply(marginal_bin_crit,2,mean)
+
+
+# Ordered multinomial
+df_votoutenza_order <- df[,-c(1:11,193,195,196)]
+df$votoutenza_order <- as.factor(df$votoutenza_order)
+formula_votoutenza_order <- reformulate(colnames(df_votoutenza_order)[-182], response = "votoutenza_order")
+polr_user <- polr(formula_votoutenza_order, data = df, Hess = T)
+coeff_user <- coef(summary(polr_user))
+pvalues <- pnorm(abs(coeff_user[, "t value"]), lower.tail = FALSE) * 2
+
+coeff_significativity_user <- round(cbind(coeff_user,pvalues),4)
+one_percent_user <- coeff_significativity_user[which(coeff_significativity_user[,4]<0.01),]
+formula_votoutenza_order <- reformulate(rownames(one_percent_user), response = "votoutenza_order")
+polr_user <- polr(formula_votoutenza_order, data = df, Hess = T)
+marginal_ordered_user <- ocME(polr_user)
+
+df_votocritica_order <- df[,-c(1:11,194,195,196)]
+df$votocritica_order <- as.factor(df$votocritica_order)
+formula_votocritica_order <- reformulate(colnames(df_votocritica_order)[-182], response = "votocritica_order")
+polr_crit <- polr(formula_votocritica_order, data = df, Hess = T)
+coeff_crit <- coef(summary(polr_crit))
+pvalues <- pnorm(abs(coeff_crit[, "t value"]), lower.tail = FALSE) * 2
+
+coeff_significativity_crit <- round(cbind(coeff_crit,pvalues),4)
+one_percent_crit <- coeff_significativity_crit[which(coeff_significativity_crit[,4]<0.01),]
+formula_votocritica_order <- reformulate(rownames(one_percent_crit)[-53], response = "votocritica_order")
+polr_crit <- polr(formula_votocritica_order, data = df, Hess = T)
+marginal_ordered_critic <- ocME(polr_crit)
