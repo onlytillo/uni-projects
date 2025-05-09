@@ -1,0 +1,189 @@
+library(dplyr)
+library(tidyverse)
+library(tidytext)
+library(tm)
+library(glmnet)
+library(caret)
+library(randomForest)
+library(data.table)
+
+set.seed(123)
+
+dt <- read.csv("ABCTelco_clients.csv")
+dfs <- read.csv("ABCTelco_complaints.csv", stringsAsFactors = F)
+dt <- na.omit(dt)
+
+# Correct column name for the text
+texts <- dfs$complaint
+
+# Drop NA or empty texts
+texts <- texts[!is.na(texts) & texts != ""]
+
+# Create a dataframe
+complaints_df <- tibble(line = 1:length(texts), text = texts)
+
+# Tokenize the text into words
+complaints_words <- complaints_df %>%
+  unnest_tokens(word, text)
+
+# Add our stopwords
+our_stopwords <- stop_words
+our_stopwords <- rbind(stop_words, c("it's", "gruppo"))
+our_stopwords <- rbind(stop_words, c("i'm", "gruppo"))
+
+# Remove stop words 
+complaints_words_clean <- complaints_words %>%
+  anti_join(stop_words, by = "word")
+
+# Remove numbers
+complaints_words_clean <- complaints_words_clean[order(complaints_words_clean$word),]
+complaints_words_clean <- complaints_words_clean[-c(1:58),]
+complaints_words_clean <- complaints_words_clean[order(complaints_words_clean$line),]
+
+# Attach sentiment lexicon: using Bing (positive/negative)
+bing_sentiments <- get_sentiments("bing")
+
+# Join words with sentiment labels
+complaints_sentiment <- complaints_words_clean %>%
+  inner_join(bing_sentiments, by = "word")
+
+# Count sentiment per complaint (line)
+complaint_scores <- complaints_sentiment %>%
+  count(line, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>%
+  mutate(sentiment_score = positive - negative)
+
+# Merge scores back to original complaints
+final_sentiment <- complaints_df %>%
+  left_join(complaint_scores, by = "line") %>%
+  mutate(sentiment_score = ifelse(is.na(sentiment_score), 0, sentiment_score))
+
+# View final sentiment scores
+final_sentiment <- as.data.frame(final_sentiment)
+
+complaints <- data.frame(unique(dfs$customerID), NA, NA)
+colnames(complaints) <- c("customerID", "n.complaints", "negative_score")
+for (i in 1:length(unique(dfs$customerID))){
+  complaints[i,2] <- which.max(dfs$complaint_number[dfs$customerID==unique(dfs$customerID)[i]])
+  complaints[i,3] <- sum(final_sentiment$negative[dfs$customerID==unique(dfs$customerID)[i]])
+}
+
+dt2 <- left_join(dt, complaints, by="customerID")
+dt2$n.complaints[is.na(dt2$n.complaints)] <- 0
+dt2$negative_score[is.na(dt2$negative_score)] <- 0
+
+dt2 <- dt2[,-1]
+dt2$Churn <- factor(dt2$Churn)
+
+for(i in 1:nrow(dt2)){
+  if(dt2$InternetService[i] == "No"){
+    dt2$OnlineSecurity[i] <- "No"
+    dt2$OnlineBackup[i] <- "No"
+    dt2$DeviceProtection[i] <- "No"
+    dt2$TechSupport[i] <- "No"
+    dt2$StreamingTV[i] <- "No"
+    dt2$StreamingMovies[i] <- "No"
+  }
+  if(dt2$PhoneService[i] == "No"){
+    dt2$MultipleLines[i] <- "No"
+  }
+}
+
+dt3 <- dt2
+for(i in colnames(dt2)){
+  if(class(dt2[[i]])=="character"){
+    dt3[[i]] <- factor(dt2[[i]])
+  }
+}
+dt3$SeniorCitizen <- factor(dt2$SeniorCitizen)
+
+dt3$anger <- dt3$negative_score/(dt3$n.complaints+1)
+
+# Create interactions
+
+dt4 <- dt3
+for(i in colnames(dt3)){
+  if(class(dt3[[i]])=="factor"){
+    dt4[[i]] <- as.integer(dt3[[i]])-1
+  }
+}
+
+dt4$full_optional <- dt4$PhoneService*dt4$OnlineBackup*dt4$DeviceProtection*dt4$TechSupport*dt4$StreamingMovies*dt4$StreamingTV
+dt4$stable <- dt4$SeniorCitizen*dt4$Partner*dt4$Dependents
+
+for(i in colnames(dt4)){
+  if(length(unique(dt4[[i]]))<5){
+    dt4[[i]] <- factor(dt4[[i]])
+  }
+}
+
+# Multi-model approach
+
+x <- model.matrix(Churn ~ ., data = dt4)
+y <- as.numeric(dt4$Churn)-1
+
+grid <- 10^seq(10, -2, length = 200)
+lasso <- glmnet(x, y, alpha = 1, lambda = grid)
+cv_lasso <- cv.glmnet(x, y, alpha = 1, nfolds=10)
+best.lambda_lasso <- cv_lasso$lambda.min
+
+ridge <- glmnet(x, y, alpha = 0, lambda = grid)
+cv_ridge <- cv.glmnet(x, y, alpha = 0, nfolds=10) 
+best.lambda_ridge <- cv_ridge$lambda.min
+
+err <- c()
+err1 <- c()
+err2 <- c()
+err3 <- c()
+err4 <- c()
+
+k <- 15
+folds <- sample(1:k, nrow(x), replace=TRUE)
+
+for(i in 1:k){
+  x.train <- x[folds != i,]
+  y.train <- y[folds != i]
+  x.test <- x[folds == i,]
+  y.test <- y[folds == i]
+  
+  train <- dt4[folds != i,]
+  test <- dt4[folds == i,]
+  
+  glm.mod <- glm(Churn~., data=train, family = binomial)
+  rf.mod <- randomForest(Churn~., data = train, ntree = 1000)
+  lasso.mod <- glmnet(x.train, y.train, alpha = 1, lambda = best.lambda_lasso, family="binomial")
+  ridge.mod <- glmnet(x.train, y.train, alpha = 0, lambda = best.lambda_ridge, family="binomial")
+  
+  glm.pred <- predict(glm.mod, newdata = test, type = "response")
+  rf.pred <- predict(rf.mod, newdata = test, type = "prob")[,2]
+  lasso.pred <- predict(lasso.mod, newx = x.test, type = "response")
+  ridge.pred <- predict(ridge.mod, newx = x.test, type = "response")
+  
+  # Meta model (stacking)
+  
+  meta_data <- data.frame(glm=glm.pred,rf=rf.pred,
+                          myridge=ridge.pred, mylasso=lasso.pred,
+                          actual = as.numeric(test$Churn)-1)
+  
+  meta_data <- data.frame(ifelse(meta_data > 0.5, 1, 0))
+  
+  meta_folds <- sample(1:k, nrow(meta_data), replace=TRUE)
+  meta_err <- c()
+  
+  for(j in 1:k){
+    meta_train <- meta_data[meta_folds != j,]
+    meta_test <- meta_data[meta_folds == j,]
+    meta_model <- randomForest(as.factor(actual)~., data = meta_train, ntree = 1000)
+    meta_pred <- predict(meta_model, newdata = meta_test, type = "prob")[,2]
+    meta_pred <- ifelse(meta_pred > 0.5, 1, 0)
+    meta_err[j] <- mean(meta_pred!= meta_test$actual)
+  }
+  
+  err[i] <- mean(meta_err)
+  err1[i] <- mean(meta_data$glm!=meta_data$actual)
+  err2[i] <- mean(meta_data$rf!=meta_data$actual)
+  err3[i] <- mean(meta_data$s0!=meta_data$actual)
+  err4[i] <- mean(meta_data$s0.1!=meta_data$actual)
+}
+
+mean(err)
